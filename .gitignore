@@ -1,0 +1,7 @@
+# compiled binaries
+http
+server
+a.out
+
+# object files
+*.o

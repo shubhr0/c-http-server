@@ -1,7 +1,11 @@
-# compiled binaries
-http
-server
-a.out
-
-# object files
+access.log
 *.o
+*.out
+mutex
+parse_server
+poll
+practice
+pthread
+staticfile_server
+streamclient
+streamserve

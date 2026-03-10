@@ -9,6 +9,8 @@
 #include<errno.h>
 #include<pthread.h>
 #include<sys/time.h>
+#include<arpa/inet.h>
+#include<time.h>
 
 #define TIMEOUT_SECONDS 5
 #define PORT 8080
@@ -16,8 +18,14 @@
 #define QUEUE_SIZE 1000
 #define NUM_THREADS 10
 
+
+typedef struct {
+    int client_fd;
+    char client_ip[INET_ADDRSTRLEN];
+} connection_t;
+
 typedef struct{
-	int *items;
+	connection_t *items;
 	int capacity;
 	int head;
 	int tail;
@@ -32,7 +40,7 @@ queue_t queue;
 pthread_t workers[NUM_THREADS];
 
 void queue_init(queue_t *q,int capacity){
-	q->items= malloc(capacity * sizeof(int));
+	q->items = malloc(capacity * sizeof(connection_t));
 	q->capacity = capacity;
 	q->head=0;
 	q->tail=0;
@@ -42,7 +50,7 @@ void queue_init(queue_t *q,int capacity){
 	pthread_cond_init(&q->cond_not_full,NULL);
 }
 
-void enqueue(int value)
+void enqueue(connection_t value)
 {
 	pthread_mutex_lock(&queue.mutex);
 
@@ -58,7 +66,7 @@ void enqueue(int value)
 	pthread_mutex_unlock(&queue.mutex);
 }
 
-int dequeue()
+connection_t dequeue()
 {
 	pthread_mutex_lock(&queue.mutex);
 
@@ -66,7 +74,7 @@ int dequeue()
 		pthread_cond_wait(&queue.cond_not_empty,&queue.mutex);
 	}
 
-	int value = queue.items[queue.head];
+	connection_t value = queue.items[queue.head];
 	queue.head = (queue.head + 1) % queue.capacity;
 	queue.count--;
 
@@ -74,7 +82,7 @@ int dequeue()
 	pthread_mutex_unlock(&queue.mutex);
 	return value;
 }
-void handle_connection(int client_fd);
+void handle_connection(int client_fd, const char *client_ip);
 
 void *worker_thread(void *arg)
 {
@@ -82,9 +90,9 @@ void *worker_thread(void *arg)
 	printf("Worker %d started\n",id);
 
 	while(1){
-		int client_fd = dequeue();
-		printf("worker %d processing %d\n",id,client_fd);
-		handle_connection(client_fd);
+		connection_t conn = dequeue();
+		printf("worker %d processing %d\n",id,conn.client_fd);
+		handle_connection(conn.client_fd,conn.client_ip);
 	}
 
 	return NULL;
@@ -123,9 +131,9 @@ int should_keep_alive(char *headers)
 	return 1;
 }
 
+void log_request(const char *client_ip,const char *method,const char *path,int status_code,size_t bytes_sent);
 
-
-void handle_connection(int client_fd)
+void handle_connection(int client_fd,const char *client_ip)
 {
 	struct timeval timeout;
         timeout.tv_sec = TIMEOUT_SECONDS;
@@ -163,11 +171,11 @@ void handle_connection(int client_fd)
 		char request_line[256];
 		strncpy(request_line,buffer,line_length);
 		request_line[line_length]='\0';
-		char method[16],path[256],version[16];
+	        char method[16],path[256],version[16];
 		sscanf(request_line,"%15s %255s %15s",method,path,version);
 
 		//handle POST request
-	
+		size_t bytes_read;
 		if(strstr(method,"POST")){
 			//find Content-Length
 			char *content_length_ptr=strstr(buffer,"Content-Length:");
@@ -204,7 +212,7 @@ void handle_connection(int client_fd)
 	
 			//read remaining body bytes
 	
-			int bytes_read = body_bytes_in_buffer;
+			bytes_read = body_bytes_in_buffer;
 			while(bytes_read < content_length){
 				int n=recv(client_fd,body+bytes_read,content_length-bytes_read,0);
 				if(n<=0) break;
@@ -220,7 +228,7 @@ void handle_connection(int client_fd)
         		char response[BUFFER_SIZE];
        		        int response_len = snprintf(response, sizeof(response),
         	     			   "HTTP/1.1 200 OK\r\n"
-        	   			   "Content-Length: %d\r\n"
+        	   			   "Content-Length: %zu\r\n"
         	   			   "Content-Type: text/plain\r\n"
         	   			   "Connection: %s\r\n"
         	  			   "\r\n"
@@ -234,8 +242,11 @@ void handle_connection(int client_fd)
 			if(!keep_alive){
 				close(client_fd);
 				return;
-			}	 
+			}
 		}
+	
+		log_request(client_ip,method,path,200,bytes_read);
+
 
 
 		char filepath[300];
@@ -320,7 +331,7 @@ void handle_connection(int client_fd)
 			total_sent+=n;
 		}
 
-		size_t bytes_read;
+	        bytes_read;
 	
 		while((bytes_read=fread(buffer,1,BUFFER_SIZE,fptr))>0){
 			size_t sent=0;
@@ -336,7 +347,8 @@ void handle_connection(int client_fd)
 				
 				sent+=n;
 			}
-		}	
+		}
+		
 
 		fclose(fptr);
 		if(!keep_alive){	
@@ -345,8 +357,29 @@ void handle_connection(int client_fd)
 		}
 	}
 }
+void log_request(const char *client_ip,const char *method,const char *path,int status_code,size_t bytes_sent)
+{
+	time_t now =time(NULL);
+	struct tm *tm_info = localtime(&now);
+	char timestamp[64];
+	strftime(timestamp,sizeof(timestamp),"%d/%b/%Y:%H:%M:%S %z",tm_info);
+	FILE *log_file = fopen("access.log","a");
+	if(log_file){
+		fprintf(log_file,"%s - - [%s] \"%s %s HTTP/1.1\" %d %zu\n",
+			client_ip,timestamp,method,path,status_code,bytes_sent);
+		fclose(log_file);
+	}
+}
+
+struct connection
+{
+	int client_fd;
+	char ip[INET_ADDRSTRLEN];
+};
 int main(void)
 {
+	struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
 
 	queue_init(&queue,QUEUE_SIZE);
 
@@ -378,13 +411,20 @@ int main(void)
 	printf("serving ./public on http://localhost:%d\n",PORT);
 	
 	while(1){
-		int client_fd=accept(server_fd,NULL,NULL);
+		int client_fd=accept(server_fd,(struct sockaddr *)&client_addr,&client_len);
 		if(client_fd<0) {perror("acceot"); continue;}
-		enqueue(client_fd);
+
+		connection_t conn;
+        	conn.client_fd = client_fd;
+
+        	inet_ntop(AF_INET,
+          	&client_addr.sin_addr,
+          	conn.client_ip,
+          	sizeof(conn.client_ip));
+
+		enqueue(conn);
 
 	}
-
-	
 	close(server_fd);
 	return 0;
 

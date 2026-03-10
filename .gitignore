@@ -9,3 +9,4 @@ pthread
 staticfile_server
 streamclient
 streamserve
+*.swp
